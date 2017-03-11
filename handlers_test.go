@@ -18,7 +18,6 @@ package main
 import (
 	"errors"
 	"net/http"
-	"net/url"
 	"testing"
 	"time"
 
@@ -27,36 +26,37 @@ import (
 )
 
 func TestExpirationHandler(t *testing.T) {
-	_, idp, svc := newTestProxyService(nil)
-	cases := []struct {
-		ExpireIn time.Duration
-		Expects  int
-	}{
+	uri := oauthURL + expiredURL
+	requests := []fakeRequest{
 		{
-			Expects: http.StatusUnauthorized,
+			URI:          uri,
+			ExpectedCode: http.StatusUnauthorized,
 		},
 		{
-			ExpireIn: time.Duration(-24 * time.Hour),
-			Expects:  http.StatusUnauthorized,
+			URI:          uri,
+			HasToken:     true,
+			Expires:      time.Duration(-48 * time.Hour),
+			ExpectedCode: http.StatusUnauthorized,
 		},
 		{
-			ExpireIn: time.Duration(14 * time.Hour),
-			Expects:  http.StatusOK,
+			URI:          uri,
+			HasToken:     true,
+			Expires:      time.Duration(14 * time.Hour),
+			ExpectedCode: http.StatusOK,
 		},
 	}
+	makeFakeRequests(t, requests, nil)
+}
 
-	for i, c := range cases {
-		token := newTestToken(idp.getLocation())
-		token.setExpiration(time.Now().Add(c.ExpireIn))
-		// sign the token
-		signed, _ := idp.signToken(token.claims)
-		// make the request
-		resp, err := resty.New().SetAuthToken(signed.Encode()).R().Get(svc + oauthURL + expiredURL)
-		if !assert.NoError(t, err, "case %d unable to make the request, error: %s", i, err) {
-			continue
-		}
-		assert.Equal(t, c.Expects, resp.StatusCode(), "case %d, expects: %d but got: %d", i, c.Expects, resp.StatusCode())
+func TestOauthRequestNotProxying(t *testing.T) {
+	requests := []fakeRequest{
+		{URI: "/oauth/test"},
+		{URI: "/oauth/..//oauth/test/"},
+		{URI: "/oauth/expired", Method: http.MethodPost, ExpectedCode: http.StatusNotFound},
+		{URI: "/oauth/expiring", Method: http.MethodPost},
+		{URI: "/oauth%2F///../test%2F%2Foauth"},
 	}
+	makeFakeRequests(t, requests, nil)
 }
 
 func TestLoginHandlerDisabled(t *testing.T) {
@@ -71,77 +71,62 @@ func TestLoginHandlerDisabled(t *testing.T) {
 }
 
 func TestLoginHandlerNotDisabled(t *testing.T) {
-	config := newFakeKeycloakConfig()
-	config.EnableLoginHandler = true
-	_, _, url := newTestProxyService(config)
-	resp, err := http.Post(url+"/oauth/login", "", nil)
-	assert.NoError(t, err)
-	assert.NotNil(t, resp)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	cfg := newFakeKeycloakConfig()
+	cfg.EnableLoginHandler = true
+	requests := []fakeRequest{
+		{URI: "/oauth/login", Method: http.MethodPost, ExpectedCode: http.StatusBadRequest},
+	}
+	makeFakeRequests(t, requests, cfg)
 }
 
 func TestLoginHandler(t *testing.T) {
-	_, _, u := newTestProxyService(nil)
+	uri := oauthURL + loginURL
+	requests := []fakeRequest{
+		{
+			URI:    uri,
+			Method: http.MethodPost,
 
-	cs := []struct {
-		Username     string
-		Password     string
-		ExpectedCode int
-	}{
-		{
-			Username:     "",
-			Password:     "",
 			ExpectedCode: http.StatusBadRequest,
 		},
 		{
-			Username:     "test",
-			Password:     "",
+			URI:          uri,
+			Method:       http.MethodPost,
+			FormValues:   map[string]string{"username": "test"},
 			ExpectedCode: http.StatusBadRequest,
 		},
 		{
-			Username:     "",
-			Password:     "test",
+			URI:          uri,
+			Method:       http.MethodPost,
+			FormValues:   map[string]string{"password": "test"},
 			ExpectedCode: http.StatusBadRequest,
 		},
 		{
-			Username:     "test",
-			Password:     "test",
+			URI:    uri,
+			Method: http.MethodPost,
+			FormValues: map[string]string{
+				"password": "test",
+				"username": "test",
+			},
 			ExpectedCode: http.StatusOK,
 		},
 		{
-			Username:     "test",
-			Password:     "notmypassword",
+			URI:    uri,
+			Method: http.MethodPost,
+			FormValues: map[string]string{
+				"password": "test",
+				"username": "notmypassword",
+			},
 			ExpectedCode: http.StatusUnauthorized,
 		},
 	}
-
-	for i, x := range cs {
-		uri := u + oauthURL + loginURL
-		values := url.Values{}
-		if x.Username != "" {
-			values.Add("username", x.Username)
-		}
-		if x.Password != "" {
-			values.Add("password", x.Password)
-		}
-
-		resp, err := http.PostForm(uri, values)
-		if err != nil {
-			t.Errorf("case %d, unable to make requets, error: %s", i, err)
-			continue
-		}
-		assert.Equal(t, x.ExpectedCode, resp.StatusCode, "case %d, expect: %v, got: %d",
-			i, x.ExpectedCode, resp.StatusCode)
-	}
+	makeFakeRequests(t, requests, nil)
 }
 
 func TestLogoutHandlerBadRequest(t *testing.T) {
-	_, _, u := newTestProxyService(nil)
-
-	res, err := http.Get(u + oauthURL + logoutURL)
-	assert.NoError(t, err)
-	assert.NotNil(t, res)
-	assert.Equal(t, res.StatusCode, http.StatusBadRequest)
+	requests := []fakeRequest{
+		{URI: oauthURL + logoutURL, ExpectedCode: http.StatusBadRequest},
+	}
+	makeFakeRequests(t, requests, nil)
 }
 
 func TestLogoutHandlerBadToken(t *testing.T) {
@@ -278,7 +263,7 @@ func TestAuthorizationURL(t *testing.T) {
 	}
 	for i, x := range cs {
 		resp, _ := client.Get(u + x.URL)
-		assert.Equal(t, x.ExpectedCode, resp.StatusCode, "case %d, expect: %v, got: %s", i, x.ExpectedCode, resp.StatusCode)
+		assert.Equal(t, x.ExpectedCode, resp.StatusCode, "case %d, expect: %v, got: %d", i, x.ExpectedCode, resp.StatusCode)
 		assert.Equal(t, x.ExpectedURL, resp.Header.Get("Location"), "case %d, expect: %v, got: %s", i, x.ExpectedURL, resp.Header.Get("Location"))
 		assert.Empty(t, resp.Header.Get(testProxyAccepted))
 	}
@@ -314,11 +299,11 @@ func TestCallbackURL(t *testing.T) {
 		if !assert.NoError(t, err, "case %d, should not have failed", i) {
 			continue
 		}
-		openIDURL := resp.Header.Get("Location")
-		if !assert.NotEmpty(t, openIDURL, "case %d, the open id redirection url is empty", i) {
+		openURL := resp.Header.Get("Location")
+		if !assert.NotEmpty(t, openURL, "case %d, the open id redirection url is empty", i) {
 			continue
 		}
-		req, _ = http.NewRequest("GET", openIDURL, nil)
+		req, _ = http.NewRequest("GET", openURL, nil)
 		resp, err = http.DefaultTransport.RoundTrip(req)
 		if !assert.NoError(t, err, "case %d, should not have failed calling the opend id url", i) {
 			continue
@@ -334,7 +319,8 @@ func TestCallbackURL(t *testing.T) {
 			continue
 		}
 		// step: check the callback location is as expected
-		assert.Contains(t, resp.Header.Get("Location"), x.ExpectedURL)
+		assert.Contains(t, resp.Header.Get("Location"), x.ExpectedURL,
+			"case %d, expected location contains: %s, got: %s", i, x.ExpectedURL, resp.Header.Get("Location"))
 	}
 }
 

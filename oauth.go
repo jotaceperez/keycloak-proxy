@@ -32,17 +32,16 @@ func (r *oauthProxy) getOAuthClient(redirectionURL string) (*oauth2.Client, erro
 			ID:     r.config.ClientID,
 			Secret: r.config.ClientSecret,
 		},
-		RedirectURL: redirectionURL,
-		AuthURL:     r.idp.AuthEndpoint.String(),
-		TokenURL:    r.idp.TokenEndpoint.String(),
-		Scope:       append(r.config.Scopes, oidc.DefaultScope...),
 		AuthMethod:  oauth2.AuthMethodClientSecretBasic,
+		AuthURL:     r.idp.AuthEndpoint.String(),
+		RedirectURL: redirectionURL,
+		Scope:       append(r.config.Scopes, oidc.DefaultScope...),
+		TokenURL:    r.idp.TokenEndpoint.String(),
 	})
 }
 
 // verifyToken verify that the token in the user context is valid
 func verifyToken(client *oidc.Client, token jose.JWT) error {
-	// step: verify the token is whom they say they are
 	if err := client.VerifyJWT(token); err != nil {
 		if strings.Contains(err.Error(), "token is expired") {
 			return ErrAccessTokenExpired
@@ -105,7 +104,6 @@ func getUserinfo(client *oauth2.Client, provider *oidc.ProviderConfig) (interfac
 
 // getToken retrieves a code from the provider, extracts and verified the token
 func getToken(client *oauth2.Client, grantType, code string) (oauth2.TokenResponse, error) {
-	// step: request a token from the authentication server
 	return client.RequestToken(grantType, code)
 }
 

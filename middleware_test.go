@@ -28,57 +28,73 @@ import (
 )
 
 type fakeRequest struct {
-	URI                     string
-	URL                     string
-	Method                  string
-	Redirects               bool
-	HasToken                bool
-	NotSigned               bool
-	Headers                 map[string]string
-	Expires                 time.Duration
-	Roles                   []string
-	FormValues              map[string]string
 	BasicAuth               bool
-	Username                string
-	Password                string
-	ProxyRequest            bool
-	ExpectedProxy           bool
+	Cookies                 []*http.Cookie
 	ExpectedCode            int
-	ExpectedHeaders         map[string]string
-	ExpectedLocation        string
 	ExpectedContent         string
 	ExpectedContentContains string
+	ExpectedHeaders         map[string]string
+	ExpectedLocation        string
+	ExpectedProxy           bool
+	Expires                 time.Duration
+	FormValues              map[string]string
+	HasCookieToken          bool
+	HasToken                bool
+	Headers                 map[string]string
+	Method                  string
+	NotSigned               bool
+	Password                string
+	ProxyRequest            bool
+	RawToken                string
+	Redirects               bool
+	Roles                   []string
+	URI                     string
+	URL                     string
+	Username                string
 }
 
 func makeFakeRequests(t *testing.T, requests []fakeRequest, cfg *Config) {
 	makeFakeRequestsWithDelay(t, requests, cfg, time.Duration(0))
 }
 
+// makeFakeRequestsWithDelay is called to run a series of fakes requests on the service
 func makeFakeRequestsWithDelay(t *testing.T, requests []fakeRequest, cfg *Config, delay time.Duration) {
-	px, idp, svc := newTestProxyService(cfg)
-	if delay > 0 {
-		<-time.After(delay)
+	// if not config, we can use the default
+	if cfg == nil {
+		cfg = newFakeKeycloakConfig()
 	}
+	// make a fake proxy service
+	px, idp, svc := newTestProxyService(cfg)
+	// we might need a delay before performing the requests
+	<-time.After(delay)
 	for i, c := range requests {
 		px.config.NoRedirects = !c.Redirects
-
-		// step: add the defaults
+		// we need to set any defaults
 		if c.Method == "" {
 			c.Method = http.MethodGet
 		}
-
 		// step: create a http client
-		request := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy()).R()
+		client := resty.New()
+		request := client.SetRedirectPolicy(resty.NoRedirectPolicy()).R()
 
 		if c.ProxyRequest {
 			request.SetProxy(svc)
 		}
-
-		// step: make the request
 		if c.BasicAuth {
 			request.SetBasicAuth(c.Username, c.Password)
 		}
-		// step: add the request parameters
+		if c.RawToken != "" {
+			setRequestAuthentication(cfg, client, request, &c, c.RawToken)
+		}
+		if c.Cookies != nil && len(c.Cookies) > 0 {
+			client.SetCookies(c.Cookies)
+		}
+		if len(c.Headers) > 0 {
+			request.SetHeaders(c.Headers)
+		}
+		if c.FormValues != nil {
+			request.SetFormData(c.FormValues)
+		}
 		if c.HasToken {
 			token := newTestToken(idp.getLocation())
 			if len(c.Roles) > 0 {
@@ -88,23 +104,12 @@ func makeFakeRequestsWithDelay(t *testing.T, requests []fakeRequest, cfg *Config
 				token.setExpiration(time.Now().Add(c.Expires))
 			}
 			if c.NotSigned {
-				unsigned := token.getToken()
-				request.SetAuthToken(unsigned.Encode())
+				authToken := token.getToken()
+				setRequestAuthentication(cfg, client, request, &c, authToken.Encode())
 			} else {
-				signed, err := idp.signToken(token.claims)
-				if !assert.NoError(t, err, "case %d, unable to sign the token, error: %s", i, err) {
-					continue
-				}
-				request.SetAuthToken(signed.Encode())
+				signed, _ := idp.signToken(token.claims)
+				setRequestAuthentication(cfg, client, request, &c, signed.Encode())
 			}
-		}
-		// headers
-		if len(c.Headers) > 0 {
-			request.SetHeaders(c.Headers)
-		}
-		// form data
-		if c.FormValues != nil {
-			request.SetFormData(c.FormValues)
 		}
 
 		// step: execute the request
@@ -125,36 +130,44 @@ func makeFakeRequestsWithDelay(t *testing.T, requests []fakeRequest, cfg *Config
 
 		// step: check against the expected
 		if c.ExpectedCode != 0 {
-			assert.Equal(t, c.ExpectedCode, resp.StatusCode(), "case %d, uri: %s,  expected: %d, got: %d",
-				i, c.URI, c.ExpectedCode, resp.StatusCode())
+			assert.Equal(t, c.ExpectedCode, resp.StatusCode(), "case %d, uri: %s, expected: %d, got: %d", i, c.URI, c.ExpectedCode, resp.StatusCode())
 		}
 		if c.ExpectedLocation != "" {
-			location := resp.Header().Get("Location")
-			assert.Equal(t, c.ExpectedLocation, location, "case %d, expected location: %s, got: %s",
-				i, c.ExpectedLocation, location)
+			l := resp.Header().Get("Location")
+			assert.Equal(t, c.ExpectedLocation, l, "case %d, expected location: %s, got: %s", i, c.ExpectedLocation, l)
 		}
 		if len(c.ExpectedHeaders) > 0 {
 			for k, v := range c.ExpectedHeaders {
-				got := resp.Header().Get(k)
-				assert.Equal(t, v, got, "case %d, expected header %s=%s, got: %s", i, k, v, got)
+				e := resp.Header().Get(k)
+				assert.Equal(t, v, e, "case %d, expected header %s=%s, got: %s", i, k, v, e)
 			}
 		}
 		if c.ExpectedProxy {
-			assert.Equal(t, "true", resp.Header().Get(testProxyAccepted), "case %d, did not proxy request", i)
+			assert.Equal(t, "true", resp.Header().Get(testProxyAccepted), "case %d, did not proxy request uri: %s", i, c.URI)
 		} else {
-			assert.Empty(t, resp.Header().Get(testProxyAccepted), "case %d, should not proxy %s", i, c.URI)
+			assert.Empty(t, resp.Header().Get(testProxyAccepted), "case %d, should not proxy uri: %s", i, c.URI)
 		}
-
 		if c.ExpectedContent != "" {
-			content := string(resp.Body())
-			assert.Equal(t, c.ExpectedContent, content, "case %d, expect content: %s, got: %s",
-				i, c.ExpectedContent, content)
+			e := string(resp.Body())
+			assert.Equal(t, c.ExpectedContent, e, "case %d, expect content: %s, got: %s", i, c.ExpectedContent, e)
 		}
 		if c.ExpectedContentContains != "" {
-			content := string(resp.Body())
-			assert.Contains(t, content, c.ExpectedContentContains, "case %d, expected contents: %s, got: %s",
-				i, c.ExpectedContentContains, content)
+			e := string(resp.Body())
+			assert.Contains(t, e, c.ExpectedContentContains, "case %d, expected contents: %s, got: %s", i, c.ExpectedContentContains, e)
 		}
+	}
+}
+
+func setRequestAuthentication(cfg *Config, client *resty.Client, request *resty.Request, c *fakeRequest, token string) {
+	switch c.HasCookieToken {
+	case true:
+		client.SetCookie(&http.Cookie{
+			Name:  cfg.CookieAccessName,
+			Path:  "/",
+			Value: token,
+		})
+	default:
+		request.SetAuthToken(token)
 	}
 }
 
@@ -321,18 +334,26 @@ func TestRolePermissionsMiddleware(t *testing.T) {
 			Roles:   []string{fakeAdminRole, fakeTestRole},
 		},
 		{
-			URL:         "/whitelist",
-			WhiteListed: true,
-			Methods:     []string{"GET"},
-			Roles:       []string{},
+			URL:     "/section/*",
+			Methods: allHTTPMethods,
+			Roles:   []string{fakeAdminRole},
 		},
 		{
-			URL:     "/",
+			URL:     "/section/one",
+			Methods: allHTTPMethods,
+			Roles:   []string{"one"},
+		},
+		{
+			URL:     "/whitelist",
+			Methods: []string{"GET"},
+			Roles:   []string{},
+		},
+		{
+			URL:     "/*",
 			Methods: allHTTPMethods,
 			Roles:   []string{fakeTestRole},
 		},
 	}
-	// test cases
 	requests := []fakeRequest{
 		{
 			URI:          "/",
@@ -481,6 +502,36 @@ func TestRolePermissionsMiddleware(t *testing.T) {
 			ExpectedCode:  http.StatusOK,
 			ExpectedProxy: true,
 		},
+		{
+			URI:          "/section/test1",
+			Redirects:    false,
+			HasToken:     true,
+			Roles:        []string{},
+			ExpectedCode: http.StatusForbidden,
+		},
+		{
+			URI:           "/section/test",
+			Redirects:     false,
+			HasToken:      true,
+			Roles:         []string{fakeTestRole, fakeAdminRole},
+			ExpectedCode:  http.StatusOK,
+			ExpectedProxy: true,
+		},
+		{
+			URI:          "/section/one",
+			Redirects:    false,
+			HasToken:     true,
+			Roles:        []string{fakeTestRole, fakeAdminRole},
+			ExpectedCode: http.StatusForbidden,
+		},
+		{
+			URI:           "/section/one",
+			Redirects:     false,
+			HasToken:      true,
+			Roles:         []string{"one"},
+			ExpectedCode:  http.StatusOK,
+			ExpectedProxy: true,
+		},
 	}
 	makeFakeRequests(t, requests, cfg)
 }
@@ -542,7 +593,7 @@ func TestCrossSiteHandler(t *testing.T) {
 		cfg.CorsMethods = c.Cors.AllowMethods
 		cfg.CorsOrigins = c.Cors.AllowOrigins
 		// create the test service
-		svc := newTestServiceWithConfig(cfg)
+		_, _, svc := newTestProxyService(cfg)
 		// login and get a token
 		token, err := makeTestOauthLogin(svc + fakeAuthAllURL)
 		if err != nil {

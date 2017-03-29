@@ -100,9 +100,7 @@ type fakeDiscoveryResponse struct {
 
 var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-//
 // newFakeOAuthServer simulates a oauth service
-//
 func newFakeOAuthServer() *fakeOAuthServer {
 	// step: load the private key
 	block, _ := pem.Decode([]byte(fakePrivateKey))

@@ -331,7 +331,7 @@ func (r *oauthProxy) logoutHandler(cx echo.Context) error {
 	}
 	r.clearAllCookies(cx.Request(), cx.Response().Writer)
 
-	// step: check if the user has a state session and if so, revoke it
+	// step: check if the user has a state session and if so revoke it
 	if r.useStore() {
 		go func() {
 			if err := r.DeleteRefreshToken(user.token); err != nil {
@@ -364,7 +364,6 @@ func (r *oauthProxy) logoutHandler(cx echo.Context) error {
 			bytes.NewBufferString(fmt.Sprintf("refresh_token=%s", identityToken)))
 		if err != nil {
 			log.WithFields(log.Fields{"error": err.Error()}).Errorf("unable to construct the revocation request")
-
 			return cx.NoContent(http.StatusInternalServerError)
 		}
 
